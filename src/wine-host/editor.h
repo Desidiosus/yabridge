@@ -169,6 +169,11 @@ class DeferredWin32Window {
  */
 class Editor {
    public:
+    enum class CoordinatePolicy {
+        generic,
+        prefer_parent_root_offset,
+    };
+
     /**
      * Open a window, embed it into the DAW's parent window and create a handle
      * to the new Win32 window that can be used by the hosted VST plugin.
@@ -196,7 +201,8 @@ class Editor {
         Logger& logger,
         const size_t parent_window_handle,
         std::optional<fu2::unique_function<void()>> timer_proc = std::nullopt,
-        std::optional<Size> initial_size = std::nullopt);
+        std::optional<Size> initial_size = std::nullopt,
+        CoordinatePolicy coordinate_policy = CoordinatePolicy::generic);
 
     /**
      * Resize the `wrapper_window_` to this new size. We need to manually call
@@ -322,9 +328,23 @@ class Editor {
     void redetect_host_window() noexcept;
 
     /**
-     * Get offset of parent window to fix mouse coordinates.
+     * Get the root-relative offset of the parent window to fix mouse
+     * coordinates.
      */
-    std::array<int16_t, 2> get_parent_window_offset();
+    std::optional<std::array<int16_t, 2>> get_parent_window_root_offset()
+        const noexcept;
+
+    /**
+     * Compute the legacy translated X11 coordinates used for forwarded
+     * ConfigureNotify events.
+     */
+    std::array<int16_t, 2> get_generic_translated_coordinates() const noexcept;
+
+    /**
+     * Compute the translated X11 coordinates used for forwarded
+     * ConfigureNotify events.
+     */
+    std::array<int16_t, 2> get_translated_coordinates(bool is_synthetic_event) const;
 
     /**
      * Reparent `child` to `new_parent`. This includes the flush.
@@ -335,6 +355,11 @@ class Editor {
      * The logger instance we will print debug tracing information to.
      */
     Logger& logger_;
+
+    /**
+     * Coordinate translation policy used for forwarded ConfigureNotify events.
+     */
+    const CoordinatePolicy coordinate_policy_;
 
     /**
      * Every editor window gets its own X11 connection.

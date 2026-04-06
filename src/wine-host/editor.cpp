@@ -271,9 +271,11 @@ Editor::Editor(MainContext& main_context,
                Logger& logger,
                const size_t parent_window_handle,
                std::optional<fu2::unique_function<void()>> timer_proc,
-               std::optional<Size> initial_size)
+               std::optional<Size> initial_size,
+               CoordinatePolicy coordinate_policy)
     : use_force_dnd_(config.editor_force_dnd),
       logger_(logger),
+      coordinate_policy_(coordinate_policy),
       x11_connection_(xcb_connect(nullptr, nullptr), xcb_disconnect),
       dnd_proxy_handle_(WineXdndProxy::get_handle()),
       wrapper_window_size_(initial_size.value_or(Size(128, 128))),
@@ -459,24 +461,81 @@ void Editor::show() noexcept {
     ShowWindow(win32_window_.handle_, SW_SHOWNORMAL);
 }
 
-std::array<int16_t, 2> Editor::get_parent_window_offset() {
+std::optional<std::array<int16_t, 2>> Editor::get_parent_window_root_offset()
+    const noexcept {
+    try {
+        xcb_generic_error_t* error = nullptr;
+        const xcb_window_t root =
+            get_root_window(*x11_connection_, parent_window_);
+        const xcb_translate_coordinates_cookie_t coord_cookie =
+            xcb_translate_coordinates(x11_connection_.get(), parent_window_,
+                                      root, 0, 0);
+        const std::unique_ptr<xcb_translate_coordinates_reply_t> coord_reply(
+            xcb_translate_coordinates_reply(x11_connection_.get(), coord_cookie,
+                                            &error));
+        if (error) {
+            free(error);
+            return std::nullopt;
+        }
+        if (!coord_reply) {
+            return std::nullopt;
+        }
 
-    xcb_generic_error_t* error = nullptr;
-    const xcb_window_t root =
-        get_root_window(*x11_connection_, parent_window_);
-    const xcb_translate_coordinates_cookie_t coord_cookie =
-        xcb_translate_coordinates(x11_connection_.get(), parent_window_, root, 0, 0);
-    const std::unique_ptr<xcb_translate_coordinates_reply_t> coord_reply(
-        xcb_translate_coordinates_reply(x11_connection_.get(), coord_cookie, &error));
-    THROW_X11_ERROR(error);
+        return std::array<int16_t, 2>{coord_reply->dst_x, coord_reply->dst_y};
+    } catch (const std::runtime_error&) {
+        return std::nullopt;
+    }
+}
+
+std::array<int16_t, 2> Editor::get_generic_translated_coordinates()
+    const noexcept {
+    std::array translated_coordinates{parent_window_config_.x,
+                                                  parent_window_config_.y};
+    if (!parent_window_config_abs_ && parent_window_ != host_window_) {
+        translated_coordinates[0] += host_window_config_.x;
+        translated_coordinates[1] += host_window_config_.y;
+    }
+
+    return translated_coordinates;
+}
+
+std::array<int16_t, 2> Editor::get_translated_coordinates(
+    const bool is_synthetic_event) const {
+    const std::array<int16_t, 2> generic_coordinates =
+        get_generic_translated_coordinates();
+    const bool prefer_root_offset =
+        coordinate_policy_ == CoordinatePolicy::prefer_parent_root_offset ||
+        !is_synthetic_event || parent_window_config_.window == XCB_NONE;
+
+    if (prefer_root_offset) {
+        const char* const source_name =
+            coordinate_policy_ == CoordinatePolicy::prefer_parent_root_offset
+                ? "preferred root offset"
+                : (parent_window_config_.window == XCB_NONE
+                       ? "uninitialized parent root offset"
+                       : "legacy root offset");
+        if (const auto offset = get_parent_window_root_offset()) {
+            logger_.log_editor_trace([&]() {
+                return "DEBUG: Coordinate source: "s + source_name + " " +
+                       std::to_string((*offset)[0]) + "x" +
+                       std::to_string((*offset)[1]);
+            });
+            return *offset;
+        }
+
+        logger_.log_editor_trace([&]() {
+            return "DEBUG: Coordinate source: "s + source_name +
+                   " unavailable, falling back to legacy "
+                   "generic/synthetic path";
+        });
+    }
 
     logger_.log_editor_trace([&]() {
-        return "DEBUG: Parent window offset " +
-        std::to_string(coord_reply->dst_x) +
-        "x" +
-        std::to_string(coord_reply->dst_y);
+        return "DEBUG: Coordinate source: legacy generic/synthetic path " +
+               std::to_string(generic_coordinates[0]) + "x" +
+               std::to_string(generic_coordinates[1]);
     });
-    return {coord_reply->dst_x, coord_reply->dst_y};
+    return generic_coordinates;
 }
 
 void Editor::handle_x11_events() noexcept {
@@ -613,20 +672,18 @@ void Editor::handle_x11_events() noexcept {
                         translated_event.response_type = XCB_CONFIGURE_NOTIFY;
                         translated_event.event = wine_window_;
                         translated_event.window = wine_window_;
-                        translated_event.width = parent_window_config_.width;
-                        translated_event.height = parent_window_config_.height;
-                        translated_event.x = parent_window_config_.x;
-                        translated_event.y = parent_window_config_.y;
-                        if (!parent_window_config_abs_ &&
-                            parent_window_ != host_window_) {
-                            translated_event.x += host_window_config_.x;
-                            translated_event.y += host_window_config_.y;
-                        }
-                        if (!is_synthetic_event) {
-                            const std::array<int16_t, 2> offset = get_parent_window_offset();
-                            translated_event.x = offset[0];
-                            translated_event.y = offset[1];
-                        }
+                        const Size parent_size{parent_window_config_.width,
+                                               parent_window_config_.height};
+                        const Size translated_size =
+                            parent_window_config_.window == XCB_NONE
+                                ? wrapper_window_size_
+                                : parent_size;
+                        translated_event.width = translated_size.width;
+                        translated_event.height = translated_size.height;
+                        const std::array<int16_t, 2> translated_coordinates =
+                            get_translated_coordinates(is_synthetic_event);
+                        translated_event.x = translated_coordinates[0];
+                        translated_event.y = translated_coordinates[1];
                         logger_.log_editor_trace([&]() {
                             return "DEBUG: Translated coords: " +
                                    std::to_string(translated_event.window) +
@@ -1056,6 +1113,10 @@ void Editor::redetect_host_window() noexcept {
     logger_.log_editor_trace([&]() {
         return "DEBUG: new host_window: " + std::to_string(new_host_window);
     });
+
+    host_window_config_ = {};
+    parent_window_config_ = {};
+    parent_window_config_abs_ = false;
 
     // We need to readjust the event masks for the new host window, keeping the
     // (very probable) possibility in mind that the old host window is the same

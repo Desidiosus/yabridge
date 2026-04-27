@@ -185,7 +185,8 @@ class Editor {
      *   for the editor to embed itself into.
      * @param timer_proc A function to run on a timer. This is used for VST2
      *   plugins to periodically call `effEditIdle` from the message loop
-     *   thread, even when the GUI is blocked.
+     *   thread, and for VST3 plugins to run resize consistency checks, even
+     *   when the GUI is blocked.
      *
      * @see win32_window_
      */
@@ -369,19 +370,19 @@ class Editor {
      * A timer we'll use to periodically run the X11 event loop plus
      * `idle_timer_proc_`, if that is set. We handle X11 events from within the
      * Win32 event loop because that allows us to still process those while the
-     * GUI is blocked. Additionally for VST2 plugins we also need this
-     * `idle_timer_proc_`, as they expected the host to periodically send an
-     * idle event. We used to just pass through the calls from the host before
-     * yabridge 3.x, but doing it ourselves here makes things m much more
-     * manageable and we'd still need a timer anyways for when the GUI is
-     * blocked.
+     * GUI is blocked. Additionally, plugin APIs may use `idle_timer_proc_` for
+     * editor upkeep. VST2 plugins expect the host to periodically send an idle
+     * event, and VST3 plugins use this for resize consistency checks. We used
+     * to just pass through the VST2 calls from the host before yabridge 3.x,
+     * but doing it ourselves here makes things much more manageable and we'd
+     * still need a timer anyways for when the GUI is blocked.
      */
     Win32Timer idle_timer_;
 
     /**
      * A function to call when the Win32 timer procs. This is used to
-     * periodically call `handle_x11_events()`, as well as `effEditIdle()` for
-     * VST2 plugins even if the GUI is being blocked.
+     * periodically call `handle_x11_events()`, as well as API-specific editor
+     * upkeep such as VST2 `effEditIdle()` and VST3 resize consistency checks.
      */
     fu2::unique_function<void()> idle_timer_proc_;
 

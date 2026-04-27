@@ -42,11 +42,11 @@ using namespace std::literals::string_literals;
     } while (0)
 
 /**
- * The Win32 timer ID we'll use to periodically call the VST2 `effeditidle`
- * function with. We have to do this on a timer because the function has to be
- * called from the GUI thread, and it should also be called while the Win32
- * event loop is being blocked (for instance when a plugin opens a dropdown
- * menu).
+ * The Win32 timer ID we'll use to periodically call editor upkeep callbacks.
+ * VST2 uses this for `effeditidle`, and VST3 uses it for resize consistency
+ * checks. We have to do this on a timer because the function has to be called
+ * from the GUI thread, and it should also be called while the Win32 event loop
+ * is being blocked (for instance when a plugin opens a dropdown menu).
  */
 constexpr size_t idle_timer_id = 1337;
 
@@ -1190,10 +1190,8 @@ LRESULT CALLBACK window_proc(HWND handle,
                 break;
             }
 
-            // We'll send idle messages on a timer for VST2 plugins. This way
-            // the plugin will get keep periodically updating its editor either
-            // when the host sends `effEditIdle` themself, or periodically when
-            // the GUI is being blocked by a dropdown or a message box.
+            // Run API-specific editor upkeep from the GUI thread, even if the
+            // GUI is being blocked by a dropdown or a message box.
             editor->run_timer_proc();
             return 0;
         } break;
